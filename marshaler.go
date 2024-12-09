@@ -43,6 +43,7 @@ type Encoder struct {
 	indentSymbol       string
 	indentTables       bool
 	marshalJsonNumbers bool
+	fieldTag           string
 }
 
 // NewEncoder returns a new Encoder that writes to w.
@@ -50,6 +51,7 @@ func NewEncoder(w io.Writer) *Encoder {
 	return &Encoder{
 		w:            w,
 		indentSymbol: "  ",
+		fieldTag:     tomlFieldTag,
 	}
 }
 
@@ -97,6 +99,12 @@ func (enc *Encoder) SetIndentTables(indent bool) *Encoder {
 // issued.
 func (enc *Encoder) SetMarshalJsonNumbers(indent bool) *Encoder {
 	enc.marshalJsonNumbers = indent
+	return enc
+}
+
+// SetFieldTag replaces the current field tag with the specified field tag.
+func (enc *Encoder) SetFieldTag(fieldTag string) *Encoder {
+	enc.fieldTag = fieldTag
 	return enc
 }
 
@@ -148,7 +156,7 @@ func (enc *Encoder) SetMarshalJsonNumbers(indent bool) *Encoder {
 // # Struct tags
 //
 // The encoding of each public struct field can be customized by the format
-// string in the "toml" key of the struct field's tag. This follows
+// string in the "toml" (or custom) key of the struct field's tag. This follows
 // encoding/json's convention. The format string starts with the name of the
 // field, optionally followed by a comma-separated list of options. The name may
 // be empty in order to provide options without overriding the default name.
@@ -164,7 +172,7 @@ func (enc *Encoder) SetMarshalJsonNumbers(indent bool) *Encoder {
 // The "commented" option prefixes the value and all its children with a comment
 // symbol.
 //
-// In addition to the "toml" tag struct tag, a "comment" tag can be used to emit
+// In addition to the "toml" (or custom ) tag struct tag, a "comment" tag can be used to emit
 // a TOML comment before the value being annotated. Comments are ignored inside
 // inline tables. For array tables, the comment is only present before the first
 // element of the array.
@@ -380,8 +388,8 @@ func isNil(v reflect.Value) bool {
 	}
 }
 
-func shouldOmitEmpty(options valueOptions, v reflect.Value) bool {
-	return options.omitempty && isEmptyValue(v)
+func (enc *Encoder) shouldOmitEmpty(options valueOptions, v reflect.Value) bool {
+	return options.omitempty && enc.isEmptyValue(v)
 }
 
 func (enc *Encoder) encodeKv(b []byte, ctx encoderCtx, options valueOptions, v reflect.Value) ([]byte, error) {
@@ -418,10 +426,10 @@ func (enc *Encoder) commented(commented bool, b []byte) []byte {
 	return b
 }
 
-func isEmptyValue(v reflect.Value) bool {
+func (enc *Encoder) isEmptyValue(v reflect.Value) bool {
 	switch v.Kind() {
 	case reflect.Struct:
-		return isEmptyStruct(v)
+		return enc.isEmptyStruct(v)
 	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
 		return v.Len() == 0
 	case reflect.Bool:
@@ -438,7 +446,7 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
-func isEmptyStruct(v reflect.Value) bool {
+func (enc *Encoder) isEmptyStruct(v reflect.Value) bool {
 	// TODO: merge with walkStruct and cache.
 	typ := v.Type()
 	for i := 0; i < typ.NumField(); i++ {
@@ -449,7 +457,7 @@ func isEmptyStruct(v reflect.Value) bool {
 			continue
 		}
 
-		tag := fieldType.Tag.Get("toml")
+		tag := fieldType.Tag.Get(enc.fieldTag)
 
 		// special field name to skip field
 		if tag == "-" {
@@ -458,7 +466,7 @@ func isEmptyStruct(v reflect.Value) bool {
 
 		f := v.Field(i)
 
-		if !isEmptyValue(f) {
+		if !enc.isEmptyValue(f) {
 			return false
 		}
 	}
@@ -715,7 +723,7 @@ func (t *table) pushTable(k string, v reflect.Value, options valueOptions) {
 	t.tables = append(t.tables, entry{Key: k, Value: v, Options: options})
 }
 
-func walkStruct(ctx encoderCtx, t *table, v reflect.Value) {
+func (enc *Encoder) walkStruct(ctx encoderCtx, t *table, v reflect.Value) {
 	// TODO: cache this
 	typ := v.Type()
 	for i := 0; i < typ.NumField(); i++ {
@@ -726,7 +734,7 @@ func walkStruct(ctx encoderCtx, t *table, v reflect.Value) {
 			continue
 		}
 
-		tag := fieldType.Tag.Get("toml")
+		tag := fieldType.Tag.Get(enc.fieldTag)
 
 		// special field name to skip field
 		if tag == "-" {
@@ -743,9 +751,9 @@ func walkStruct(ctx encoderCtx, t *table, v reflect.Value) {
 		if k == "" {
 			if fieldType.Anonymous {
 				if fieldType.Type.Kind() == reflect.Struct {
-					walkStruct(ctx, t, f)
+					enc.walkStruct(ctx, t, f)
 				} else if fieldType.Type.Kind() == reflect.Ptr && !f.IsNil() && f.Elem().Kind() == reflect.Struct {
-					walkStruct(ctx, t, f.Elem())
+					enc.walkStruct(ctx, t, f.Elem())
 				}
 				continue
 			} else {
@@ -775,7 +783,7 @@ func walkStruct(ctx encoderCtx, t *table, v reflect.Value) {
 func (enc *Encoder) encodeStruct(b []byte, ctx encoderCtx, v reflect.Value) ([]byte, error) {
 	var t table
 
-	walkStruct(ctx, &t, v)
+	enc.walkStruct(ctx, &t, v)
 
 	return enc.encodeTable(b, ctx, t)
 }
@@ -879,7 +887,7 @@ func (enc *Encoder) encodeTable(b []byte, ctx encoderCtx, t table) ([]byte, erro
 
 	hasNonEmptyKV := false
 	for _, kv := range t.kvs {
-		if shouldOmitEmpty(kv.Options, kv.Value) {
+		if enc.shouldOmitEmpty(kv.Options, kv.Value) {
 			continue
 		}
 		hasNonEmptyKV = true
@@ -898,7 +906,7 @@ func (enc *Encoder) encodeTable(b []byte, ctx encoderCtx, t table) ([]byte, erro
 
 	first := true
 	for _, table := range t.tables {
-		if shouldOmitEmpty(table.Options, table.Value) {
+		if enc.shouldOmitEmpty(table.Options, table.Value) {
 			continue
 		}
 		if first {
@@ -932,7 +940,7 @@ func (enc *Encoder) encodeTableInline(b []byte, ctx encoderCtx, t table) ([]byte
 
 	first := true
 	for _, kv := range t.kvs {
-		if shouldOmitEmpty(kv.Options, kv.Value) {
+		if enc.shouldOmitEmpty(kv.Options, kv.Value) {
 			continue
 		}
 
